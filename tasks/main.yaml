@@ -1,0 +1,68 @@
+---
+- name: Restoring latest backups
+  block:
+  - name: Mounting filesystems before restoring
+    command:
+      warn: no
+      argv: [ "mount", "{{ item.src }}", "{{ item.path }}", "-t", "{{ item.fstype }}", "-o", "{{ item.opts }},x-mount.mkdir" ]
+    changed_when: no
+    loop: "{{ to_mount }}"
+
+  - name: Creating password file
+    tempfile:
+      state: file
+      suffix: restic
+    register: restic_passfile
+    changed_when: no
+
+  - name: Saving password on passfile
+    copy:
+      content: "{{ restic_password }}"
+      dest: "{{ restic_passfile.path }}"
+    changed_when: no
+
+  - name: Finding all restic configuration files
+    find:
+      contains: "^BACKUP_PATH="
+      depth: 1
+      path: "{{ root_target }}/etc/restic"
+      patterns: "*.conf"
+    register: restic_config_files
+
+  - name: Restoring every restic backup found
+    command:
+      argv:
+        - /bin/bash
+        - -c
+        - |
+          set -a
+          source "{{ item }}"
+          unset RESTIC_PASSWORD_COMMAND
+
+          restic restore latest \
+            --host="{{ restic_hostname }}" \
+            --path="$BACKUP_PATH" \
+            --password-file="{{ restic_passfile.path }}" \
+            {% if not ansible_local.bootstrapped | default(false) %}--target="{{ root_target }}" {% endif %} \
+            $EXTRA_GLOBAL_ARGS \
+            $EXTRA_RESTORE_ARGS
+    with_items: "{{ restic_config_files | json_query(\"files[*].path\") }}"
+    register: restic_result
+    failed_when: restic_result.rc != 0
+
+  always:
+  - name: Deleting password file
+    file:
+      path: "{{ restic_passfile.path }}"
+      state: absent
+    changed_when: no
+
+  - name: Unmounting filesystems previously not mounted
+    command:
+      warn: no
+      argv:
+        - umount
+        - "{{ item.path }}"
+    changed_when: no
+    loop: "{{ to_mount[::-1] | default ([]) }}"
+  when: not ansible_local.bootstrapped | default(false) or force_restic
